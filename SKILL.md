@@ -22,28 +22,27 @@ Based on Anthropic's research on [effective harnesses for long-running agents](h
   • Mode B (Autopilot)  — dev-agent.py run 启动 claude -p 子进程循环
 ```
 
-## Setup
+## Auto Setup
 
-把两个文件复制到项目根目录：
+When this skill is triggered, Claude MUST automatically copy the required files to the project root:
 
-```bash
-cp /path/to/infinite-dev/scripts/dev-agent.py ./dev-agent.py
-cp /path/to/infinite-dev/templates/AGENTS.md ./AGENTS.md
-```
+1. Copy `dev-agent.py` from this skill's `scripts/` directory to the project root
+2. Copy `AGENTS.md` from this skill's `templates/` directory to the project root
+3. Then proceed to Initializer Mode or Coding Agent Mode depending on project state
 
-AGENTS.md 包含两种 Mode 的完整指令，Claude 读取后会询问用户选择哪种。
+Claude should resolve the skill path dynamically (the skill lives at the path where this SKILL.md is located).
 
-## Initializer Mode — 项目还没有 feature_list.json
+## Initializer Mode — feature_list.json does not exist
 
-Claude 直接操作，完成以下步骤：
+Claude performs these steps automatically:
 
-1. 读取项目 spec（spec.md、app_spec.txt、README，或询问用户）
-2. 生成 `feature_list.json`（20-200 个 feature，按优先级排序）
-3. 创建 `init.sh`（环境安装脚本，幂等）
-4. 初始化 git 仓库，首次提交
-5. 搭建项目脚手架
-6. 创建 `claude-progress.txt`
-7. 进入 Coding Agent Mode（选 A 或 B）
+1. Read the project spec (spec.md, app_spec.txt, README, or ask the user)
+2. Generate `feature_list.json` (20-200 features, sorted by priority)
+3. Create `init.sh` (idempotent environment setup script)
+4. Initialize git repo, first commit
+5. Scaffold project structure
+6. Create `claude-progress.txt`
+7. Ask user: Mode A or Mode B? Then start Coding Agent Mode
 
 ## Coding Agent Mode A: Interactive
 

@@ -101,17 +101,26 @@ State Persistence (across all context windows):
 
 ---
 
-## Quick Start
+## Install
 
 ```bash
-# 1. Copy files to your project
-cp ~/.claude/skills/infinite-dev/scripts/dev-agent.py ./dev-agent.py
-cp ~/.claude/skills/infinite-dev/templates/AGENTS.md ./AGENTS.md
+npx skills add RobertWang4/infinite-dev-skill
+```
 
-# 2. Tell Claude what to build
+Or manually copy to `~/.claude/skills/infinite-dev/`.
+
+## Quick Start
+
+Just tell Claude what to build — everything else is automatic:
+
+```
 > Build me a task management app with React and Express
 
-# Claude reads AGENTS.md → generates feature_list.json → asks Mode A or B → starts building
+# Claude auto-triggers this skill:
+#   1. Copies dev-agent.py + AGENTS.md to your project
+#   2. Reads your spec → generates feature_list.json
+#   3. Asks you: Mode A (interactive) or Mode B (autopilot)?
+#   4. Starts building features one by one
 ```
 
 ---
