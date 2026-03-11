@@ -99,8 +99,10 @@ dev-agent.py run
 | Command | Description |
 |---------|-------------|
 | `python dev-agent.py run` | Autopilot：每个 feature 一个 claude -p 子进程 |
+| `python dev-agent.py run --parallel N` | 并行模式：同时跑 N 个 feature（worktree 隔离）|
 | `python dev-agent.py status` | 显示进度（passing/total/skipped + 最近笔记）|
 | `python dev-agent.py next` | 显示下一个要做的 feature（尊重优先级和依赖）|
+| `python dev-agent.py find-parallel` | 显示可并行开发的独立 feature 列表 |
 | `python dev-agent.py complete <id>` | 标记 feature 为通过 |
 | `python dev-agent.py skip <id> [reason]` | 标记 feature 为跳过（记录原因）|
 | `python dev-agent.py regression` | 随机选 1-2 个已通过 feature 做回归检查 |
@@ -155,13 +157,50 @@ Rules:
 
 ## Team Mode (Parallel Development)
 
-在单个 Claude 会话内使用 subagent 并行开发多个 feature：
+### 触发时机
 
-1. 读 `feature_list.json`，找 2-4 个互不依赖的 feature
-2. 创建 git worktree：`git worktree add ../project-feature-<ID> -b feature-<ID>`
-3. 用 Task 工具启动 subagent（subagent_type: generalPurpose），每个负责一个 feature
-4. 各 subagent 在 worktree 中实现 → 测试 → 提交
-5. 合并分支，`python dev-agent.py complete <id>`
-6. 清理 worktree：`git worktree remove <path>`
+在每完成一个 feature 后（Phase 4 结束时），检查是否适合开启并行：
+
+```bash
+python dev-agent.py find-parallel --count 3
+```
+
+如果满足以下条件，**主动询问用户**是否启用 Team Mode：
+- 剩余未完成 feature >= 6
+- 可并行的独立 feature >= 2
+- 本次会话尚未询问过（避免反复打扰）
+
+提示语：
+> "检测到 N 个可并行开发的独立 feature（剩余 M 个），是否启用 Team Mode 并行开发？"
+
+### Mode A 下的 Team Mode
+
+在当前 Claude 会话内使用 Agent tool + worktree 并行开发：
+
+1. 运行 `python dev-agent.py find-parallel --count 3` 找到独立 feature
+2. 对每个 feature 用 Agent tool 启动 subagent（设置 `isolation: "worktree"`）
+3. 各 subagent 在隔离 worktree 中实现 → 测试 → 提交
+4. 合并分支，`python dev-agent.py complete <id>`
+5. 清理 worktree
+
+### Mode B 下的 Team Mode
+
+使用 `dev-agent.py run --parallel N`，脚本自动处理 worktree 创建/合并/清理：
+
+```bash
+python dev-agent.py run --parallel 3          # 同时跑 3 个 feature
+python dev-agent.py run --parallel 2 --max-features 6  # 并行 2，最多 6 个
+```
+
+并行执行流程：
+1. `find_next_features(N)` 找到 N 个独立 feature
+2. 为每个 feature 创建 git worktree（`.worktrees/feature-<id>`）
+3. 同时启动 N 个 `claude -p` 子进程（各在自己的 worktree 中）
+4. 等待全部完成
+5. 逐个合并回主分支（`git merge --no-ff`）
+6. 清理 worktree + 删除分支
+7. 重新加载 feature_list.json，继续下一批
+
+合并冲突处理：保留主分支，skip 冲突的 feature，记录原因。
 
 适用于：50+ feature 待完成、feature 之间独立、用户要求加速。

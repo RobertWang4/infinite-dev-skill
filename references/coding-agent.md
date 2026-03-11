@@ -226,6 +226,21 @@ Before ending the session:
 
 ## Team Mode: Parallel Feature Development
 
+### Team Mode Prompt
+
+After completing each feature (Phase 4), check if parallel development is appropriate:
+
+```bash
+python dev-agent.py find-parallel --count 3
+```
+
+If the output shows >= 2 parallelizable features AND remaining features >= 6, prompt the user:
+> "检测到 N 个可并行开发的独立 feature（剩余 M 个），是否启用 Team Mode 并行开发？"
+
+Only prompt **once per session**. If the user declines, continue sequentially without asking again.
+
+### Mode A: Agent tool + worktree
+
 When the team lead spawns you as a feature coder in a worktree:
 
 1. You'll receive a specific feature assignment in your prompt
@@ -236,7 +251,7 @@ When the team lead spawns you as a feature coder in a worktree:
 
 When acting as team lead:
 
-1. Read `feature_list.json` and identify 2-4 independent features
+1. Run `python dev-agent.py find-parallel --count 3` to identify independent features
 2. Features are independent if they don't share UI components, database tables, or API endpoints
 3. Create worktrees: `git worktree add ../project-feature-<ID> -b feature-<ID>`
 4. Spawn feature coders as Task agents (subagent_type: generalPurpose), each with their worktree path
@@ -249,6 +264,17 @@ When acting as team lead:
 8. Clean up worktrees: `git worktree remove <path>`
 9. Update `feature_list.json` and `claude-progress.txt` with all completed work
 10. Commit the merged state
+
+### Mode B: dev-agent.py run --parallel
+
+For fully autonomous parallel execution:
+
+```bash
+python dev-agent.py run --parallel 3          # 3 features at a time
+python dev-agent.py run --parallel 2 --max-features 8  # parallel 2, limit 8 total
+```
+
+The script handles worktree creation, process spawning, merging, and cleanup automatically. Merge conflicts are handled by skipping the conflicting feature (main branch is preserved).
 
 ### Picking Independent Features
 

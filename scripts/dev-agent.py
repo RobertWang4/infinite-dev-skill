@@ -8,11 +8,13 @@ All workflow logic lives here, keeping it OUT of Claude's context window.
 Usage (Claude runs these via Shell):
     python dev-agent.py status              # Show progress summary
     python dev-agent.py next                # Get next feature to implement
+    python dev-agent.py find-parallel       # Show parallelizable features
     python dev-agent.py complete <id>       # Mark feature as passing
     python dev-agent.py skip <id> <reason>  # Mark feature as skipped
     python dev-agent.py regression          # Pick 1-2 passing features to verify
     python dev-agent.py log <message>       # Append to claude-progress.txt
     python dev-agent.py run                 # Autonomous loop: spawns claude -p per feature
+    python dev-agent.py run --parallel 3    # Run 3 features in parallel (worktree isolation)
     python dev-agent.py run --max-features 5  # Limit to 5 features per run
 """
 
@@ -80,6 +82,48 @@ def find_next_feature(features: list[dict]) -> dict | None:
             continue
         return f
     return None
+
+
+def find_next_features(features: list[dict], n: int) -> list[dict]:
+    """Find up to N mutually-independent features that can run in parallel."""
+    passing_ids = get_passing_ids(features)
+    candidates = []
+    for f in sorted(features, key=lambda x: x.get("priority", 999)):
+        if f.get("passes") is True or f.get("passes") == "skipped":
+            continue
+        deps = f.get("depends_on", [])
+        if deps and not all(d in passing_ids for d in deps):
+            continue
+        candidates.append(f)
+
+    selected = []
+    selected_ids = set()
+    for f in candidates:
+        deps = set(f.get("depends_on", []))
+        if not deps & selected_ids:
+            selected.append(f)
+            selected_ids.add(f["id"])
+            if len(selected) >= n:
+                break
+    return selected
+
+
+def cmd_find_parallel(project_dir: Path, count: int = 3, **_):
+    """Show parallelizable features and remaining count."""
+    features = load_features(project_dir)
+    remaining = sum(1 for f in features if f.get("passes") not in (True, "skipped"))
+    batch = find_next_features(features, count)
+
+    print(f"Remaining features: {remaining}")
+    print(f"Parallelizable features found: {len(batch)}")
+    if len(batch) >= 2:
+        print(f"\nCan run in parallel:")
+        for f in batch:
+            print(f"  #{f['id']}: {f['description']}")
+        print(f"\nMode A: use Agent tool + worktree for each")
+        print(f"Mode B: python dev-agent.py run --parallel {len(batch)}")
+    else:
+        print("Not enough independent features for parallel execution.")
 
 
 def cmd_next(project_dir: Path, **_):
@@ -220,6 +264,159 @@ def _append_structured_progress(project_dir: Path, feature_id: int,
 # Autonomous run — spawns claude -p per feature
 # ---------------------------------------------------------------------------
 
+def _create_worktree(project_dir: Path, feature_id: int) -> Path | None:
+    """Create a git worktree for a feature. Returns worktree path or None on failure."""
+    wt_dir = project_dir / ".worktrees"
+    wt_dir.mkdir(exist_ok=True)
+    wt_path = wt_dir / f"feature-{feature_id}"
+    branch = f"feature-{feature_id}"
+    try:
+        subprocess.run(
+            ["git", "worktree", "add", str(wt_path), "-b", branch],
+            cwd=str(project_dir), capture_output=True, text=True, check=True,
+        )
+        return wt_path
+    except subprocess.CalledProcessError as e:
+        print(f"  [ERROR] Failed to create worktree for feature #{feature_id}: {e.stderr.strip()}")
+        return None
+
+
+def _remove_worktree(project_dir: Path, feature_id: int):
+    """Remove worktree and its branch."""
+    wt_path = project_dir / ".worktrees" / f"feature-{feature_id}"
+    branch = f"feature-{feature_id}"
+    try:
+        subprocess.run(
+            ["git", "worktree", "remove", str(wt_path), "--force"],
+            cwd=str(project_dir), capture_output=True, text=True,
+        )
+    except Exception:
+        pass
+    try:
+        subprocess.run(
+            ["git", "branch", "-D", branch],
+            cwd=str(project_dir), capture_output=True, text=True,
+        )
+    except Exception:
+        pass
+
+
+def _merge_worktree(project_dir: Path, feature_id: int) -> bool:
+    """Merge feature branch back into current branch. Returns True on success."""
+    branch = f"feature-{feature_id}"
+    try:
+        result = subprocess.run(
+            ["git", "merge", "--no-ff", branch, "-m", f"merge: feature #{feature_id} from parallel run"],
+            cwd=str(project_dir), capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            print(f"  [CONFLICT] Merge failed for feature #{feature_id}, aborting merge")
+            subprocess.run(
+                ["git", "merge", "--abort"],
+                cwd=str(project_dir), capture_output=True, text=True,
+            )
+            return False
+        return True
+    except Exception as e:
+        print(f"  [ERROR] Merge error for feature #{feature_id}: {e}")
+        return False
+
+
+def run_parallel_batch(project_dir: Path, batch: list[dict], passing: int, total: int,
+                       model: str, max_turns: int, timeout: int) -> list[int]:
+    """Run a batch of features in parallel using worktrees. Returns list of completed feature IDs."""
+    worktrees = {}  # feature_id -> worktree_path
+    procs = {}      # feature_id -> Popen
+
+    # 1. Create worktrees and start processes
+    for feature in batch:
+        fid = feature["id"]
+        wt_path = _create_worktree(project_dir, fid)
+        if not wt_path:
+            continue
+        worktrees[fid] = wt_path
+
+        system_prompt = FEATURE_SYSTEM_PROMPT.format(
+            feature_id=fid,
+            description=feature["description"],
+            pass_count=f"{passing + 1}/{total}",
+        )
+        user_prompt = build_feature_prompt(feature, passing, total)
+
+        cmd = [
+            "claude", "-p",
+            "--dangerously-skip-permissions",
+            "--max-turns", str(max_turns),
+            "--system-prompt", system_prompt,
+        ]
+        if model:
+            cmd.extend(["--model", model])
+
+        print(f"  Starting feature #{fid} in {wt_path}...")
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            cwd=str(wt_path.resolve()),
+        )
+        proc.stdin.write(user_prompt)
+        proc.stdin.close()
+        procs[fid] = proc
+
+    if not procs:
+        print("  No parallel processes started.")
+        return []
+
+    # 2. Wait for all processes
+    print(f"  Waiting for {len(procs)} parallel sessions...")
+    completed_ids = []
+    for fid, proc in procs.items():
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout)
+            if proc.returncode == 0:
+                print(f"  ✅ Feature #{fid} session finished")
+                output_lines = stdout.strip().split("\n") if stdout else []
+                for line in output_lines[-5:]:
+                    print(f"    {line}")
+            else:
+                print(f"  ❌ Feature #{fid} session failed (exit {proc.returncode})")
+                if stderr:
+                    print(f"    {stderr[:300]}")
+        except subprocess.TimeoutExpired:
+            print(f"  ⏱️ Feature #{fid} timed out, killing...")
+            proc.kill()
+            proc.wait()
+
+    # 3. Merge completed branches and clean up
+    for fid in list(worktrees.keys()):
+        # Check if feature was marked complete in the worktree's copy
+        wt_path = worktrees[fid]
+        wt_features_path = wt_path / "feature_list.json"
+        merged = False
+        if wt_features_path.exists():
+            with open(wt_features_path) as f:
+                wt_features = json.load(f)
+            for wf in wt_features:
+                if wf["id"] == fid and wf.get("passes") is True:
+                    # Feature was completed in worktree, merge it
+                    if _merge_worktree(project_dir, fid):
+                        completed_ids.append(fid)
+                        print(f"  🔀 Merged feature #{fid}")
+                        merged = True
+                    else:
+                        print(f"  ⚠️ Feature #{fid} completed but merge failed, skipping")
+                    break
+
+        if not merged:
+            print(f"  ⏭️ Feature #{fid} not completed in worktree, skipping merge")
+
+        _remove_worktree(project_dir, fid)
+        print(f"  🧹 Cleaned up worktree for feature #{fid}")
+
+    return completed_ids
+
 FEATURE_SYSTEM_PROMPT = """You are an expert developer. Every session follows this MANDATORY workflow.
 
 ## Step 1: Initialize Environment
@@ -351,7 +548,7 @@ def run_one_feature(project_dir: Path, feature: dict, passing: int, total: int,
 
 def cmd_run(project_dir: Path, model: str = "",
             max_features: int = 0, max_turns: int = 150,
-            timeout: int = 1800, delay: int = 3, **_):
+            timeout: int = 1800, delay: int = 3, parallel: int = 1, **_):
     """Autonomous development loop. Each feature gets a fresh claude -p process."""
     features = load_features(project_dir)
     total = len(features)
@@ -364,6 +561,7 @@ def cmd_run(project_dir: Path, model: str = "",
     print(f"  Model: {model or '(CLI default)'}")
     print(f"  Max features: {'unlimited' if max_features == 0 else max_features}")
     print(f"  Timeout per feature: {timeout}s")
+    print(f"  Parallel: {parallel}")
     print("=" * 60)
 
     while True:
@@ -385,6 +583,43 @@ def cmd_run(project_dir: Path, model: str = "",
             print(f"\n  All features processed! {passing} passing, {skipped} skipped.")
             break
 
+        # --- Parallel mode ---
+        if parallel > 1:
+            batch = find_next_features(features, parallel)
+            if not batch:
+                print("\n  No available features (deps unmet or all skipped).")
+                break
+            if len(batch) == 1:
+                # Only one available — fall through to sequential
+                pass
+            else:
+                remaining_budget = max_features - completed_this_run if max_features > 0 else len(batch)
+                batch = batch[:remaining_budget]
+                print(f"  Running {len(batch)} features in parallel...")
+                for f in batch:
+                    print(f"    #{f['id']}: {f['description']}")
+
+                completed_ids = run_parallel_batch(
+                    project_dir, batch, passing, total,
+                    model=model, max_turns=max_turns, timeout=timeout,
+                )
+
+                if completed_ids:
+                    consecutive_errors = 0
+                    completed_this_run += len(completed_ids)
+                    print(f"  Batch done: {len(completed_ids)}/{len(batch)} features completed")
+                else:
+                    consecutive_errors += 1
+                    if consecutive_errors >= 3:
+                        print(f"\n  3 consecutive batches with no progress. Stopping.")
+                        _append_plain_progress(project_dir, f"Auto-run stopped: 3 consecutive failed batches")
+                        break
+
+                if delay > 0:
+                    time.sleep(delay)
+                continue
+
+        # --- Sequential mode (parallel=1 or single feature available) ---
         nf = find_next_feature(features)
         if not nf:
             print("\n  No available features (deps unmet or all skipped).")
@@ -442,6 +677,10 @@ def main():
     sub.add_parser("status", help="Show progress summary")
     sub.add_parser("next", help="Get next feature to implement")
 
+    p_parallel = sub.add_parser("find-parallel", help="Show parallelizable features")
+    p_parallel.add_argument("--count", "-n", type=int, default=3,
+                            help="Max number of parallel features to find (default: 3)")
+
     p_complete = sub.add_parser("complete", help="Mark feature as passing")
     p_complete.add_argument("feature_id", type=int)
 
@@ -469,6 +708,8 @@ def main():
                         help="Timeout per feature in seconds (default: 1800)")
     p_run.add_argument("--delay", type=int, default=3,
                         help="Seconds between sessions (default: 3)")
+    p_run.add_argument("--parallel", type=int, default=1,
+                        help="Number of features to run in parallel (default: 1, sequential)")
 
     args = parser.parse_args()
     if not args.command:
@@ -478,13 +719,16 @@ def main():
     cmd_map = {
         "status": cmd_status,
         "next": cmd_next,
+        "find-parallel": cmd_find_parallel,
         "complete": cmd_complete,
         "skip": cmd_skip,
         "regression": cmd_regression,
         "log": cmd_log,
         "run": cmd_run,
     }
-    cmd_map[args.command](project_dir=args.project_dir, **vars(args))
+    kwargs = vars(args)
+    command = kwargs.pop("command")
+    cmd_map[command](**kwargs)
 
 
 if __name__ == "__main__":

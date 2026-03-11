@@ -61,6 +61,18 @@ python dev-agent.py log --feature-id <id> --done "- changes" --testing "- how te
 ### Step 6: Next Feature or Clear
 
 After completing a feature:
+
+**Team Mode check** (only once per session):
+```bash
+python dev-agent.py find-parallel --count 3
+```
+If output shows >= 2 parallelizable features AND remaining >= 6:
+- Prompt user: **"检测到 N 个可并行开发的独立 feature（剩余 M 个），是否启用 Team Mode？"**
+  - Mode A: Use Agent tool with `isolation: "worktree"` for each feature
+  - Mode B: Run `python dev-agent.py run --parallel N`
+- If user declines, do NOT ask again this session.
+
+**Then continue normally:**
 - If context is still short: go back to Step 2 immediately.
 - If you've done 2+ features or context is getting long:
   - Ensure git status is clean.
@@ -105,6 +117,7 @@ Options:
 python dev-agent.py run --max-features 10    # Limit per run
 python dev-agent.py run --timeout 3600       # 1 hour per feature
 python dev-agent.py run --model <name>       # Override model
+python dev-agent.py run --parallel 3         # Run 3 features in parallel (worktree isolation)
 ```
 
 This spawns a separate `claude -p` process for each feature. Each gets a clean context automatically. No /clear needed.
@@ -117,6 +130,7 @@ This spawns a separate `claude -p` process for each feature. Each gets a clean c
 |---------|-------------|
 | `python dev-agent.py status` | Show progress |
 | `python dev-agent.py next` | Show next feature |
+| `python dev-agent.py find-parallel` | Show parallelizable features |
 | `python dev-agent.py complete <id>` | Mark feature passing |
 | `python dev-agent.py skip <id> "reason"` | Skip a feature |
 | `python dev-agent.py regression` | Pick features to re-verify |
