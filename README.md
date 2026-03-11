@@ -109,6 +109,14 @@ npx skills add RobertWang4/infinite-dev-skill
 
 Or manually copy to `~/.claude/skills/infinite-dev/`.
 
+## Update
+
+```bash
+npx skills update
+```
+
+This updates **all** installed skills to their latest versions, not just this one.
+
 ## Quick Start
 
 Just tell Claude what to build — everything else is automatic:
